@@ -1,4 +1,9 @@
-Go_Sample
+# Go_Sample
 
-# Libvirt/
+The samples of Golang lib
+
+libvirt-xml/
 	- guestconf.go # Libvirt-go-xml generate Guest XML
+
+libvirt/
+	- controller.go # libvirt-go Connection samples
