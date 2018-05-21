@@ -1,9 +1,10 @@
-package business
+package vm_mgr
 
 import (
+	"github.com/libvirt/libvirt-go"
 	"github.com/libvirt/libvirt-go-xml"
 	"strings"
-	"github.com/libvirt/libvirt-go"
+	"fmt"
 )
 
 const (
@@ -11,11 +12,29 @@ const (
 	I686 = "i686"
 )
 
+/* cpu mode
+** host-model: Default cpu mode.
+** host-passthrough:
+** custom: Customize cpu mode, cpu_model is required.
+
+*/
+const (
+	HOST_MODEL = "host-model"
+	CUSTOM = "custom"
+	HOST_PT = "host-passthrough"
+	NONE = "none"
+)
+
+// cpu model
+
+
+
 type GuestDisk struct {
 	UUID		string
 	Type 		string
 	IsBoot		bool
 	MountPoint	string
+	Source 		string
 }
 
 type GuestConf struct {
@@ -29,10 +48,12 @@ type GuestConf struct {
 	Description string
 	OSType		string
 	Arch		string
+	QGA			bool
 }
 
 func (guestconf * GuestConf)GetGuestXML(conn * libvirt.Connect) (string, error) {
 	guest := new(libvirtxml.Domain)
+	guest.Type = "kvm"
 	guest.Memory = &libvirtxml.DomainMemory{Value: uint(guestconf.Mem * 1024)}//From Mib to KiB
 	guest.VCPU = &libvirtxml.DomainVCPU{Value: guestconf.Cpu, Placement: "static"}
 	guest.Description = guestconf.Description
@@ -94,7 +115,14 @@ func (guestconf * GuestConf)GetGuestXML(conn * libvirt.Connect) (string, error) 
 	// Set MemBalloon
 	guestconf.setMemBalloon(guest)
 
+	if guestconf.QGA == true {
+		guestconf.setQemuGuestAgent(guest)
+	}
+
 	return guest.Marshal()
+}
+
+func (guestconf * GuestConf)setCPU(clock * libvirtxml.DomainCPU) {
 }
 
 func (guestconf * GuestConf)setClockTimer(clock * libvirtxml.DomainClock) {
@@ -148,20 +176,20 @@ func (guestconf * GuestConf)setGuestStorageDevices(guest * libvirtxml.Domain) er
 
 // Set rbd disk
 func (guestconf * GuestConf)setRbdDisk(disk * GuestDisk, dom_disk * libvirtxml.DomainDisk) error {
-	name := disk.UUID
 	mon_host, err := GetMonHost()
 	if err != nil {
 		return err
 	}
 	hosts := make([]libvirtxml.DomainDiskSourceHost, 0)
 	for _, h := range strings.Split(mon_host, ",") {
-		hosts = append(hosts, libvirtxml.DomainDiskSourceHost{Name: h, Port: "6789"})
+		mon := strings.Split(strings.Split(h, "/")[0], ":")
+		hosts = append(hosts, libvirtxml.DomainDiskSourceHost{Name: mon[0], Port: mon[1]})
 	}
 
 	// Config ceph Auth from config
 	auth := libvirtxml.DomainDiskAuth{Username: "admin",
 		Secret: &libvirtxml.DomainDiskSecret{Type: "ceph", Usage: "cephadmin"}}
-	rbd_vol := libvirtxml.DomainDiskSourceNetwork{Protocol: "rbd", Name: name,
+	rbd_vol := libvirtxml.DomainDiskSourceNetwork{Protocol: "rbd", Name: disk.Source,
 		Hosts: hosts, Auth: &auth}
 	source := libvirtxml.DomainDiskSource{Network: &rbd_vol}
 	dom_disk.Device = "disk"
@@ -210,12 +238,23 @@ func (guestconf * GuestConf)setGraphics(guest * libvirtxml.Domain){
 
 func (guestconf * GuestConf)setDefaultVideo(guest * libvirtxml.Domain) {
 	video := libvirtxml.DomainVideo{Model: libvirtxml.DomainVideoModel{Type: "cirrus"}}
-	guest.Devices.Videos = []libvirtxml.DomainVideo{video}
+	guest.Devices.Videos = append(guest.Devices.Videos, video)
 }
 
 func (guestconf * GuestConf)setMemBalloon(guest * libvirtxml.Domain) {
 	guest.Devices.MemBalloon = &libvirtxml.DomainMemBalloon{Model: "virtio",
 		Stats: &libvirtxml.DomainMemBalloonStats{Period: 10}}
+}
+
+
+func (guestconf * GuestConf)setQemuGuestAgent(guest * libvirtxml.Domain) {
+	path := fmt.Sprintf("/var/lib/libvirt/qemu/ckr.qemu.gueset.agent.0-%s.sock", guestconf.Name)
+	source := libvirtxml.DomainChardevSource{UNIX: &libvirtxml.DomainChardevSourceUNIX{Mode: "bind",
+		Path: path}}
+	target := libvirtxml.DomainChannelTarget{
+		VirtIO: &libvirtxml.DomainChannelTargetVirtIO{Name: ""}}
+	channel := 	libvirtxml.DomainChannel{Source: &source, Target: &target}
+	guest.Devices.Channels = append(guest.Devices.Channels, channel)
 }
 
 func (guestconf * GuestConf)GetGuestConf(vmid string, conn * libvirt.Connect) error{
@@ -236,7 +275,7 @@ func (guestconf * GuestConf)GetGuestConf(vmid string, conn * libvirt.Connect) er
 	guestconf.Cpu = guest.VCPU.Value
 	//
 	guestconf.DiskList = make([]GuestDisk, 0)
-	for disk, _ := range guest.Devices.Disks {
+	for _, disk := range guest.Devices.Disks {
 		if disk.Device != "disk" {
 			continue
 		}

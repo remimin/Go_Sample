@@ -1,4 +1,4 @@
-package main
+package vm_mgr
 
 import (
 	"strings"
